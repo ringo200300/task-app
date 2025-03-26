@@ -1,20 +1,22 @@
-from flask import Flask, render_template_string, request, redirect, session, url_for
+from flask import Flask, request, redirect, render_template_string, url_for
 from flask_login import LoginManager, login_user, logout_user, login_required, UserMixin, current_user
 import csv
 import os
-from datetime import datetime
 
 app = Flask(__name__)
-app.secret_key = 'your_secret_key'
+app.secret_key = 'secret_key'
 login_manager = LoginManager()
 login_manager.init_app(app)
 
-CSV_FILE = "tasks.csv"
+USER_CSV = 'users.csv'
 
-USERS = {
-    "admin": {"password": "adminpass", "role": "admin"},
-    "user": {"password": "userpass", "role": "user"}
-}
+# 初期ユーザー作成
+if not os.path.exists(USER_CSV):
+    with open(USER_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["username", "password", "role"])
+        writer.writerow(["admin", "adminpass", "admin"])
+        writer.writerow(["user", "userpass", "user"])
 
 class User(UserMixin):
     def __init__(self, id, role):
@@ -23,33 +25,37 @@ class User(UserMixin):
 
 @login_manager.user_loader
 def load_user(user_id):
-    user = USERS.get(user_id)
-    if user:
-        return User(user_id, user["role"])
+    with open(USER_CSV, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["username"] == user_id:
+                return User(user_id, row["role"])
     return None
 
-def init_csv():
-    if not os.path.exists(CSV_FILE):
-        with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["業務内容", "分類", "AI代替", "ステータス", "締切", "登録者", "更新者"])
-
-init_csv()
+def get_all_users():
+    users = []
+    with open(USER_CSV, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            users.append(row)
+    return users
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
         uid = request.form["username"]
         pw = request.form["password"]
-        user = USERS.get(uid)
-        if user and user["password"] == pw:
-            login_user(User(uid, user["role"]))
-            return redirect("/")
+        with open(USER_CSV, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row["username"] == uid and row["password"] == pw:
+                    login_user(User(uid, row["role"]))
+                    return redirect("/")
     return render_template_string("""
         <h2>ログイン</h2>
         <form method="POST">
-            <input name="username" placeholder="ユーザー名" required><br>
-            <input name="password" type="password" placeholder="パスワード" required><br>
+            <input name="username" placeholder="ユーザー名"><br>
+            <input name="password" type="password" placeholder="パスワード"><br>
             <button type="submit">ログイン</button>
         </form>
     """)
@@ -60,53 +66,67 @@ def logout():
     logout_user()
     return redirect("/login")
 
-@app.route("/", methods=["GET", "POST"])
+@app.route("/admin/users", methods=["GET", "POST"])
 @login_required
-def index():
+def manage_users():
+    if current_user.role != "admin":
+        return "アクセス権がありません"
+
+    msg = ""
     if request.method == "POST":
-        task = request.form["task"]
-        deadline = request.form.get("deadline", "")
-        category = "ノンコア" if "入力" in task or "整理" in task or "部品" in task else "コア"
-        ai_flag = "可能" if "メール" in task or "表作成" in task else "不可"
-        status = "未着手"
-        with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow([task, category, ai_flag, status, deadline, current_user.id, ""])
-        return redirect("/")
+        if "add_user" in request.form:
+            new_user = request.form["new_user"]
+            new_pass = request.form["new_pass"]
+            new_role = request.form["new_role"]
+            with open(USER_CSV, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([new_user, new_pass, new_role])
+            msg = f"{new_user} を追加しました。"
+        elif "delete_user" in request.form:
+            del_user = request.form["delete_user"]
+            rows = get_all_users()
+            with open(USER_CSV, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=["username", "password", "role"])
+                writer.writeheader()
+                for row in rows:
+                    if row["username"] != del_user:
+                        writer.writerow(row)
+            msg = f"{del_user} を削除しました。"
 
-    tasks = []
-    with open(CSV_FILE, newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        next(reader)
-        for row in reader:
-            tasks.append(row)
-
+    users = get_all_users()
     return render_template_string("""
-        <style>
-            body { font-family: sans-serif; max-width: 800px; margin: auto; padding: 1rem; }
-            input, button { padding: 5px; margin: 5px; width: 100%%; }
-            table { width: 100%%; border-collapse: collapse; }
-            th, td { border: 1px solid #ccc; padding: 4px; text-align: left; }
-            @media (max-width: 600px) {
-                table, thead, tbody, th, td, tr { display: block; }
-                td { margin-bottom: 10px; }
-            }
-        </style>
-        <h2>タスク登録（ようこそ {{ current_user.id }} さん）</h2>
+        <h2>ユーザー管理（管理者専用）</h2>
+        <p>{{ msg }}</p>
         <form method="POST">
-            <input name="task" placeholder="業務内容" required>
-            <input name="deadline" type="date">
-            <button type="submit">登録</button>
+            <h3>ユーザー追加</h3>
+            <input name="new_user" placeholder="ユーザー名" required>
+            <input name="new_pass" placeholder="パスワード" required>
+            <select name="new_role">
+                <option value="user">user</option>
+                <option value="admin">admin</option>
+            </select>
+            <button name="add_user" type="submit">追加</button>
         </form>
-        <h3>登録済みタスク</h3>
-        <table>
-            <tr><th>業務内容</th><th>分類</th><th>AI代替</th><th>ステータス</th><th>締切</th><th>登録者</th><th>更新者</th></tr>
-            {% for row in tasks %}
-            <tr>{% for col in row %}<td>{{ col }}</td>{% endfor %}</tr>
+        <h3>ユーザー一覧</h3>
+        <ul>
+            {% for u in users %}
+                <li>{{ u.username }} ({{ u.role }}) 
+                {% if u.username != 'admin' %}
+                    <form method="POST" style="display:inline;">
+                        <input type="hidden" name="delete_user" value="{{ u.username }}">
+                        <button name="delete_btn" type="submit">削除</button>
+                    </form>
+                {% endif %}
+                </li>
             {% endfor %}
-        </table>
-        <p><a href="/logout">ログアウト</a></p>
-    """, tasks=tasks)
+        </ul>
+        <a href="/">← タスク一覧へ</a>
+    """, users=users, msg=msg)
+
+@app.route("/")
+@login_required
+def home():
+    return f"ようこそ、{current_user.id} さん！ <a href='/admin/users'>ユーザー管理</a> | <a href='/logout'>ログアウト</a>"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
